@@ -1,6 +1,21 @@
 ﻿namespace FSharpx.Collections
 #if FX_NO_THREAD
 #else
+/// Node is an internal class of PersistentVector. It is exposed in the API because some other
+/// data structures make use of it, but it is not intended for use outside the FSharpx.Collections
+/// library. You should not use it unless you know what you're doing.
+/// Which is why the next line of these docs is [omit], because that should (if it works right)
+/// ensure that this class is NOT seen in the API docs, but IS available to inherit from.
+/// [omit]
+[<Class>]
+type Node =
+    new : unit -> Node
+    new : thread:System.Threading.Thread ref * array:obj [] -> Node
+    member Array : obj[]
+    member Thread : System.Threading.Thread ref
+    member SetThread : System.Threading.Thread -> unit
+
+
 /// PersistentVector is an ordered linear structure implementing the inverse of the List signature, 
 /// (last, initial, conj) in place of (head, tail, cons). Length is O(1). Indexed lookup or update
 /// (returning a new immutable instance of Vector) of any element is O(log32n), which is close enough
@@ -12,6 +27,11 @@ type PersistentVector<'T> =
 
     interface System.Collections.Generic.IEnumerable<'T>
     interface System.Collections.IEnumerable
+
+    member internal Root : Node
+    member internal Tail : obj[]
+    member internal Shift : int
+    member internal TailOffset : int
 
     /// O(1). Returns a new vector with the element added at the end.
     member Conj : 'T -> PersistentVector<'T>
@@ -148,4 +168,13 @@ module PersistentVector =
 
     /// O(n). Returns a vector of vectors of given length from the seq. Result may be a jagged vector.
     val inline windowSeq : int  -> seq<'T> -> PersistentVector<PersistentVector<'T>>
+
+[<Class>]
+type internal TransientVector<'T> =
+    new : unit -> TransientVector<'T>
+
+    member internal EnsureEditable : Node -> Node
+    member conj<'T> : 'T -> TransientVector<'T>
+
+    member internal persistent : unit -> PersistentVector<'T>
 #endif

@@ -32,11 +32,11 @@ module Gen =
             return Seq.append (Seq.singleton x) xs
         }
 
-    let infiniteLazyList() =
-        Gen.map LazyList.ofSeq (infiniteSeq())
+    // let infiniteLazyList() =
+    //     Gen.map LazyList.ofSeq (infiniteSeq())
 
-    let finiteLazyList() =
-        Gen.map LazyList.ofList Arb.generate
+    // let finiteLazyList() =
+    //     Gen.map LazyList.ofList Arb.generate
 
 (*
 Recommend a range of size 1 - 12 for lists used to build test data structures:

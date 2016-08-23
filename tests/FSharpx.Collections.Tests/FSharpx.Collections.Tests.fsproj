@@ -65,7 +65,7 @@
     <None Include="paket.references" />
     <None Include="app.config" />
     <Compile Include="FsUnit.fs" />
-    <Compile Include="FsCheckRunner.fs" />
+    <!--<Compile Include="FsCheckRunner.fs" />
     <Compile Include="FsCheckProperties.fs" />
     <Compile Include="Utilities.fs" />
     <Compile Include="ArrayTests.fs" />
@@ -86,7 +86,7 @@
     <Compile Include="SeqTests.fs" />
     <Compile Include="PersistentVectorTest.fs" />
     <Compile Include="TransientHashMapTest.fs" />
-    <Compile Include="PersistentHashMapTest.fs" />
+    <Compile Include="PersistentHashMapTest.fs" />-->
   </ItemGroup>
   <ItemGroup>
     <Reference Include="mscorlib" />

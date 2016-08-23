@@ -61,7 +61,7 @@
     </Otherwise>
   </Choose>
   <Import Project="$(FSharpTargetsPath)" Condition="Exists('$(FSharpTargetsPath)')" />
-  <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
+  <!-- To modify your build process, add your task inside one of the targets below and uncomment it.
 	     Other similar extension points exist, see Microsoft.Common.targets.
 	<Target Name="BeforeBuild">
 	</Target>
@@ -75,7 +75,7 @@
     <Content Include="app.config" />
     <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Infrastructure.fs" />
-    <Compile Include="AltBinaryRandomAccessList.fs" />
+    <!--<Compile Include="AltBinaryRandomAccessList.fs" />
     <Compile Include="BankersDeque.fs" />
     <Compile Include="BankersQueue.fs" />
     <Compile Include="BatchedDeque.fs" />
@@ -104,12 +104,18 @@
     <Compile Include="RealTimeDeque.fs" />
     <Compile Include="RealTimeQueue.fs" />
     <Compile Include="RingBuffer.fs" />
-    <Compile Include="RoseTree.fs" />
-    <Compile Include="SkewBinaryRandomAccessList.fs" />
+    <Compile Include="RoseTree.fs" />-->
+    <Compile Include="RRBArrayExtensions.fs" />
+    <Compile Include="RRBVectorRecord.fs" />
+    <Compile Include="RRBVector.fs" />
+    <!--<Compile Include="SkewBinaryRandomAccessList.fs" />
     <Compile Include="TimeSeries.fs" />
     <Compile Include="CSharpCompat.fs" />
     <Compile Include="BlockResizeArray.fs" />
     <Compile Include="SkewBinomialHeap.fs" />
+    <Compile Include="SkewBinomialHeap.fs" />-->
+    <None Include="paket.template" />
+    <Content Include="app.config" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="mscorlib" />

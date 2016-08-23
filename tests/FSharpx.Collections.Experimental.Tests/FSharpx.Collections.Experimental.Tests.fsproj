@@ -82,7 +82,7 @@
     <Compile Include="..\FSharpx.Collections.Tests\Utilities.fs">
       <Link>Utilities.fs</Link>
     </Compile>
-    <Compile Include="QueueGen.fs" />
+    <!--<Compile Include="QueueGen.fs" />
     <Compile Include="HeapGen.fs" />
     <Compile Include="AltBinaryRandomAccessListTest.fs" />
     <Compile Include="BankersDequeTest.fs" />
@@ -107,14 +107,15 @@
     <Compile Include="ListZipperTest.fs" />
     <Compile Include="NonEmptyListTests.fs" />
     <Compile Include="PairingHeapTest.fs" />
-    <Compile Include="RingBufferTest.fs" />
-    <Compile Include="SkewBinaryRandomAccessListTest.fs" />
+    <Compile Include="RingBufferTest.fs" />-->
+    <Compile Include="RRBVectorTest.fs" />
+    <!--<Compile Include="SkewBinaryRandomAccessListTest.fs" />
     <Compile Include="RealTimeDequeTest.fs" />
     <Compile Include="RealTimeQueueTest.fs" />
     <Compile Include="RoseTreeTest.fs" />
     <Compile Include="TimeSeriesTest.fs" />
     <Compile Include="BlockResizeArrayTest.fs" />
-    <Compile Include="SkewBinomialHeapTest.fs" />
+    <Compile Include="SkewBinomialHeapTest.fs" />-->
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\FSharpx.Collections.Experimental\FSharpx.Collections.Experimental.fsproj">

@@ -4,8 +4,8 @@
 	{
 		static void Main(string[] args)
 		{
-            PersistentVectorSamples.Samples();
-            PersistentHashMapSamples.Samples();
+            // PersistentVectorSamples.Samples();
+            // PersistentHashMapSamples.Samples();
 		}
 	}
 }

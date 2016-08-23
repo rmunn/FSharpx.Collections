@@ -7,6 +7,7 @@ open Fake
 open Fake.Git
 open Fake.AssemblyInfoFile
 open Fake.ReleaseNotesHelper
+open Fake.Testing.Expecto
 open System
 open System.IO
 #if MONO
@@ -46,8 +47,13 @@ let tags = "F# fsharp fsharpx collections datastructures"
 // File system information 
 let solutionFile  = "FSharpx.Collections.sln"
 
+// Debug or Release
+let configuration = "Debug"
+
 // Pattern specifying assemblies to be tested using NUnit
-let testAssemblies = "tests/**/bin/Release/*Tests*.dll"
+let testAssemblies = sprintf "tests/**/bin/%s/*Tests*.dll" configuration
+let expectoAssemblies = sprintf "tests/**/bin/%s/*Expecto*.exe" configuration
+let expectoProj = "tests/**/*Expecto*.fsproj"
 
 // Git configuration (used for publishing documentation in gh-pages branch)
 // The profile where the project is posted
@@ -83,6 +89,7 @@ Target "AssemblyInfo" (fun _ ->
           Attribute.Description summary
           Attribute.InternalsVisibleTo "FSharpx.Collections.Tests"
           Attribute.InternalsVisibleTo "FSharpx.Collections.Experimental.Tests"
+          Attribute.InternalsVisibleTo "FSharpx.Collections.Experimental"
           Attribute.Version release.AssemblyVersion
           Attribute.FileVersion release.AssemblyVersion ]
 
@@ -109,7 +116,13 @@ Target "AssemblyInfo" (fun _ ->
 // src folder to support multiple project outputs
 Target "CopyBinaries" (fun _ ->
     !! "src/**/*.??proj"
-    |>  Seq.map (fun f -> ((System.IO.Path.GetDirectoryName f) @@ "bin/Release", "bin" @@ (System.IO.Path.GetFileNameWithoutExtension f)))
+    |>  Seq.map (fun f -> ((System.IO.Path.GetDirectoryName f) @@ "bin" @@ configuration, "bin" @@ (System.IO.Path.GetFileNameWithoutExtension f)))
+    |>  Seq.iter (fun (fromDir, toDir) -> CopyDir toDir fromDir (fun _ -> true))
+)
+
+Target "CopyExpectoBinaries" (fun _ ->
+    !! expectoProj
+    |>  Seq.map (fun f -> ((System.IO.Path.GetDirectoryName f) @@ "bin" @@ configuration, "bin" @@ (System.IO.Path.GetFileNameWithoutExtension f)))
     |>  Seq.iter (fun (fromDir, toDir) -> CopyDir toDir fromDir (fun _ -> true))
 )
 
@@ -129,7 +142,15 @@ Target "CleanDocs" (fun _ ->
 
 Target "Build" (fun _ ->
     !! solutionFile
-    |> MSBuildRelease "" "Rebuild"
+    // |> MSBuildRelease "" "Rebuild"
+    |> MSBuild "" "Rebuild" ["Configuration",configuration]
+    |> ignore
+)
+
+Target "BuildExpecto" (fun _ ->
+    !! expectoProj
+    // |> MSBuildRelease "" "Rebuild"
+    |> MSBuild "" "Rebuild" ["Configuration",configuration]
     |> ignore
 )
 
@@ -144,6 +165,20 @@ Target "RunTests" (fun _ ->
             TimeOut = TimeSpan.FromMinutes 20.
             OutputFile = "TestResults.xml" })
 )
+
+let expecto debug _ =
+    !! expectoAssemblies
+    |> Seq.map (fun x -> tracefn "Assembly: %A" x ; x)
+    |> Expecto (fun p ->
+        { p with
+            Debug = debug
+            FailOnFocusedTests = false
+            Summary = false })
+
+Target "Expecto" (expecto false)
+Target "ExpectoDebug" (expecto true)
+Target "RunExpecto" (expecto false)
+Target "RunExpectoDebug" (expecto true)
 
 #if MONO
 #else
@@ -375,4 +410,12 @@ Target "All" DoNothing
   ==> "PublishNuget"
   ==> "Release"
 
-RunTargetOrDefault "All"
+"Clean"
+  ==> "AssemblyInfo"
+  ==> "BuildExpecto"
+  ==> "CopyExpectoBinaries"
+  ==> "Expecto"
+  <=> "ExpectoDebug"
+
+// RunTargetOrDefault "All"
+RunTargetOrDefault "RunTests"

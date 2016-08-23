@@ -7,4 +7,4 @@ if [ $exit_code -ne 0 ]; then
 fi
 
 export VisualStudioVersion=14.0
-mono packages/FAKE/tools/FAKE.exe $@ --fsiargs -d:MONO build.fsx 
+mono packages/FAKE/tools/FAKE.exe $@ --fsiargs -d:MONO build.fsx

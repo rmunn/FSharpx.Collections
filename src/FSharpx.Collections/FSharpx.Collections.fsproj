@@ -59,7 +59,7 @@
     </Otherwise>
   </Choose>
   <Import Project="$(FSharpTargetsPath)" Condition="Exists('$(FSharpTargetsPath)')" />
-  <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
+  <!-- To modify your build process, add your task inside one of the targets below and uncomment it.
 	     Other similar extension points exist, see Microsoft.Common.targets.
 	<Target Name="BeforeBuild">
 	</Target>
@@ -72,7 +72,7 @@
     <None Include="paket.template" />
     <Content Include="app.config" />
     <Compile Include="AssemblyInfo.fs" />
-    <Compile Include="Exceptions.fs" />
+    <!--<Compile Include="Exceptions.fs" />
     <Compile Include="Interfaces.fs" />
     <Compile Include="Infrastructure.fs" />
     <Compile Include="LazyList.fsi" />
@@ -91,12 +91,14 @@
     <Compile Include="RandomAccessList.fsi" />
     <Compile Include="RandomAccessList.fs" />
     <Compile Include="Queue.fsi" />
-    <Compile Include="Queue.fs" />
+    <Compile Include="Queue.fs" />-->
     <Compile Include="Literals.fs" />
     <Compile Include="PersistentVector.fsi" />
     <Compile Include="PersistentVector.fs" />
     <Compile Include="PersistentHashMap.fs" />
     <Compile Include="TaggedCollections.fs" />
+    <None Include="paket.template" />
+    <Content Include="app.config" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="mscorlib" />

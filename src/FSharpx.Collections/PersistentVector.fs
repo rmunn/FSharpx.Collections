@@ -7,6 +7,7 @@ open FSharpx.Collections
 #else
 open System.Threading
 
+[<StructuredFormatDisplay("{StringRepr}")>]
 type Node(thread,array:obj[]) =
     let thread = thread
     new() = Node(ref null,Array.create Literals.blockSize null)
@@ -15,6 +16,7 @@ type Node(thread,array:obj[]) =
         member this.Array = array
         member this.Thread = thread
         member this.SetThread t = thread := t
+        member this.StringRepr = if array.Length = 0 then sprintf "EmptyNode" elif array.[0] :? Node then sprintf "FullNode(%A)" array else sprintf "%d" array.Length
 
 type internal TransientVector<'T> (count,shift:int,root:Node,tail:obj[]) =
     let mutable count = count
@@ -170,6 +172,11 @@ and PersistentVector<'T> (count,shift:int,root:Node,tail:obj[])  =
             if this.GetHashCode() <> y.GetHashCode() then false else
             Seq.forall2 (Unchecked.equals) this y
         | _ -> false
+
+    member internal this.Root = root
+    member internal this.Tail = tail
+    member internal this.Shift = shift
+    member internal this.TailOffset = tailOff
 
     member internal this.SetHash hash = hashCode := hash; this
 

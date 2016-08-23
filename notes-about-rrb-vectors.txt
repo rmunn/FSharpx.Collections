@@ -1,0 +1,1439 @@
+Notes about RRB vectors
+
+Papers:
+
+Bagwell/Rampf paper: https://infoscience.epfl.ch/record/169879/files/RMTrees.pdf
+L'orange thesis: http://hypirion.com/thesis.pdf
+Stucki/Rampf/Ureche/Bagwell paper: https://pdfs.semanticscholar.org/757a/5426c52dc4f8fe8e8121d5909f0763a80819.pdf
+(Title of that one: "RRB Vector: A Practical General Purpose Immutable Sequence")
+
+Bagwell/Rampf paper, page 4:
+
+n = nodes being considered for balancing
+p = total size of these nodes (how many entries are in all of them)
+m = branching factor (32 in the "standard" setup)
+k = shift bits = lg(m) (5 in the "standard" setup)
+e = maximum extra search steps caused by the unbalanced state
+
+e = n - (floor((p-1)/m) + 1); OR... e = n - 1 - ((p-1) >> k)
+
+With m=32, Bagwell and Rampf say that an e=2 has been found acceptable in practice,
+so that nodes can be between 30 and 32 in size.
+
+Some terminology
+================
+
+Leaf - the bottom layer of the RRB tree. Typical maximum 32 items.
+Twig - one layer above leaf. Typical maximum 32^2 = 1024 items.
+Branch - one layer above twig. Typical maximum 32^3 = 32,768 items.
+Limb - one layer above branch. Typical maximum 32^4 = 1,048,576 items.
+Trunk - one layer above limb. Typical maximum 32^5 = 33,554,432 items.
+Tree - one layer above trunk. Typical maximum 32^6 = 1,073,741,824 items.
+
+Actual maximum of an RRB vector, since we're using the default F# int type (which
+is a signed int32) for indexes, will be 2^31 = 2,147,483,648 items. So a fully
+fleshed-out RRB tree could actually contain two "tree" nodes, and be seven layers
+tall. (And if any of those are size-table nodes, then the root will have more than
+two entries.)
+
+
+Concatenation algorithm
+=======================
+
+Or rather, rebalancing.
+
+During concatenation rebalancing, skip nodes of size 31 or 32.
+Starting from the leftmost node of the two node groups that are being joined, skip
+any nodes of skippable size (31 or 32). From the first "small" (size <= 30) node
+found, start adding up node sizes as you go to the right. Once you've found enough
+nodes to have one less after balancing, you've found the group that will be copied.
+
+Before that, though, you'll use the e = n-1 - ((p-1) >> k) formula. If e = 2 or less,
+then no rebalancing of this set of nodes is needed. For example:
+
+If you have 31 nodes of size 31, then you have 31*31 = 961 nodes total. So
+p-1 / m = 960 / 32 = 30. And e = 31-1 - 30 = 0, so no rebalancing needed.
+
+If you have 30 nodes of size 30, then you have 30*30 = 900 nodex total. So
+p-1 / m = 899 / 32 = 28.09, floor to 28. And e = 30-1 - 28 = 1, so no rebalancing needed.
+
+Yet if you had 30 nodes of size 30, then it would be *possible* to rebalance that into
+28 nodes of size 32, plus one node of size 4 at the end. So as long as e > 2, we KNOW
+that rebalancing cannot overflow.
+
+Note that since e = n - 1 - ((p-1) >> k), the "e > 2" formula becomes:
+
+n-1 - ((p-1) >> k) > 2
+n - ((p-1) >> k) > 3
+
+n > ((p-1) >> k) + 3
+
+So that's the comparison. Take the number of nodes, n. Sum up each node's elements.Length, p.
+If (p-1) >> k + 3 < n, then we must rebalance.
+
+Rebalancing example worked out
+==============================
+
+Say the number of entries in each node looked like the following after a concatenation:
+
+Entry sizes = [32; 31; 30; 31; 32; 30; 30; 25; 30; 24; 30; 23; 30]
+
+We would skip the first two, then starting at the 30, we'd start adding up a running total
+of node sizes until the running total was less than (32 * one fewer node). So, with the
+running total of node sizes on one line and the relevant powers of 32 on the next line:
+
+Indices =       0   1   2   3   4   5   6   7   8   9  10  11  12
+Entry sizes = [32; 31; 30; 31; 32; 30; 30; 25; 30; 24; 30; 23; 30]
+Subtotals =     X   X  30  61  93 123 153 178 208 232 262 285
+Powers of 32 =  X   X   0  32  64  96 128 160 192 224 256 288
+
+At this point we stop, because we've found our mergeable node sequence. By merging the
+nodes from index 2 to index 11 (a total of 10 nodes), we can rewrite them into 9 nodes
+that will be balanced. The new entry size list would look like:
+
+Indices =       0   1   2   3   4   5   6   7   8   9  10  11
+Entry sizes = [32; 31; 32; 32; 32; 32; 32; 32; 32; 32; 29; 30]
+
+Algorithm for doing that operation:
+
+let inline index2 idx a1 a2 =
+    let len1 = a1.Length
+    if idx < len1 then
+        a1.[idx]
+    else
+        a2.[idx - len1]
+
+let inline findIndex2 pred a1 a2 =
+    match Array.tryFindIndex pred a1 with
+    | Some idx -> idx
+    | None -> a1.Length + Array.findIndex pred a2
+
+// (e1 and e2 are "entries1" and "entries2": the entry arrays for the joining nodes)
+
+let indicesOfMergeableNodes e1 e2 =
+    let startIdx = e1,e2 ||> findIndex2 (fun e -> e.entries.Length < 31)
+    let mutable i = startIdx
+    let mutable n = (index2 i e1 e2).Length
+    let mutable m = 0
+    while m < n do
+        i <- i + 1
+        n <- n + (index2 i e1 e2).Length
+        m <- m + 32
+    (startIdx,i)
+
+Now we start shifting nodes over, based on the node-count table from before:
+
+Indices =       0   1   2   3   4   5   6   7   8   9  10  11  12
+Subtotals =     X   X  30  61  93 123 153 178 208 232 262 285
+Powers of 32 =  X   X   0  32  64  96 128 160 192 224 256 288
+
+becomes:
+
+Indices =           0   1   2   3   4   5   6   7   8   9  10  11
+Old entry sizes = [32; 31; 30; 31; 32; 30; 30; 25; 30; 24; 30; 23; 30]
+New entry sizes = [32; 31; 32; 32; 32; 32; 32; 32; 32; 32; 29; 30]
+Nodes shifted =     0   0   2   3   3   5   7  14  16  24  23   0
+
+At each index that was being shifted, the number of nodes being shifted
+is (previousShiftCount + (32 - oldNodeCount)).
+Note that at index 10, we calculated 26 shifts, but actually shifted over 23.
+That's because we actually did min(26, nextNodeCount) shifts: because the
+next node over (that we're shifting from) had fewer items in it than the
+number we would be shifting, we're DONE and the next node after that (which
+had 30 in it) will be unchanged.
+
+One POSSIBLE algorithm for this: Create a new node of (subtotal from shift
+group) size. In this case, that's 285, so we'd have `Array.zeroCreate 285`.
+Then we would use Array.blit to copy the values into it, and then slice it
+up with ArraySegment slices so we don't have to copy it twice. Problem: that's
+not actually allowed. So what we'd have to do is create each array as we go,
+the first part from the tail end of the "left" node and the second part from
+the head end of the "right" node. Something like this:
+
+// Left node entries is e1, right node is e2
+// We want from index i1 of first array to the end, then we want (32 - i1)
+// items from the second array.
+if (32 - i1) >= e2.Length then
+    let newArray = Array.zeroCreate 32
+    Array.blit e1 i1 newArray  0 (e1.Length - i1 - 1)
+    Array.blit e2  0 newArray i1 (32 - i1)
+    (set new start idx for e2 to be (32 - i1))
+else
+    let newArray = Array.zeroCreate (e1.Length - i1 + e2.Length + (1?0?Off-by-one-here))
+    Array.blit e1 i1 newArray  0 (e1.Length - i1 - 1)
+    Array.blit e2  0 newArray i1 e2.Length
+
+NOTE: That if statement might be unnecessary. We might be able to get away with
+a single zeroCreate operation. But maybe not, since e2.Length would involve a max() in
+the second blit and there's a branch inside that max() anyway.
+
+That copies over the entries. To create the size table, we'd just have to
+use Array.scan on the entries table, with (e.Length + prevValue) as the scan function.
+(We can't copy previous values, because size tables start from 0 in each node, and so
+copying them from the other node would involve enough math in adding the up-to-this-point
+index's value that it wouldn't be a win anyway. Just go with Array.scan here).
+
+Also, when creating a node, the size table should be the LAST thing created, after
+its entries array has been finalized. And therefore, if we ever start using transient
+nodes that eventually get turned into permanent nodes, we should create the size table
+as part of the transient-into-permanent operation. (Maybe -- but wouldn't there be a
+size table needed in the transients, that would be auto-updated as we go? Yes, actually,
+there would be -- so never mind.)
+
+
+Algorithms
+==========
+
+Index lookup
+------------
+
+An algorithm for looking up an index in a size table:
+
+let inline findIdx idx sizeTbl =
+    let mutable i = idx >> shift   // shift is 5 in a "standard" 32-branching vector
+    while sizeTbl.[i] <= idx do
+        i <- i + 1
+    i
+
+After calling `findIdx`, you'd then:
+
+let i = findIdx desiredIdx sizeTbl
+if this.nodeType = LeafNode then
+    entries.[i]
+else
+    let newidx = desiredIdx - sizeTbl.[i]
+    let nextNode = entries.[i]
+    goto startOfLoop with newidx and nextNode.sizeTbl
+// In place of "goto startOfLoop", of course, we will use tail-recursion
+
+
+Deletion
+--------
+
+We'll hold off on any immediate balancing. Instead, if "this" node gets too
+small (say, m/2 = 16), we'll redistribute (m/4 = 8) entries from its right-hand
+neighbor so that both become size (3m/4 = 24) or so. Or else we'll calculate
+the value of e for its parent, adding up all node sizes, and use that to figure
+out whether to rebalance. But that involves about 32 cache loads, so maybe that's
+best avoided. Not sure which is better. Is there any benefit to keeping a node-count
+table in addition to a size table???
+
+Insertion
+---------
+
+If this node is non-full, easy. If it's full and its next neighbor is non-full,
+slide some items to the right; while we're sliding things over, let's balance
+these two nodes evenly (so a 32 and a 16 would become 25 and 24 after the insertion
+into the left of the two nodes). If this node is full AND its neighbor is full,
+we'll probably just split ourselves into two nodes. (If the parent is full, this
+is an insertion into the parent and we move the whole algorithm up one level). If
+the parent had room, then 32;32 becomes 17;16;32, which after more insertions in
+the same place will eventually become 32;16;32, which after the next insertion
+will become 25;24;32.
+
+
+
+Notes about ClojureScript RRB vectors
+=====================================
+
+In ClojureScript, the nodes from PersistentVector are reused. I could potentially
+do that here, to make conversion to or from a PersistentVector simpler since I
+could just reuse the same node objects without copying. (I would just need to make
+a new root). That's probably a good idea: the "full node" type will be a PersistentVector
+node. And the "RRB node" type will be a subclass of the PersistentVector.Node type.
+However, the RRBVector class will *not* subclass PersistentVector, because if anyone
+is using :? type pattern matching against PersistentVector, I do not want that to
+match RRBVector. They have different performance characteristics and should appear
+as different types.
+
+In ClojureScript, the size table is the 33rd entry in the children array. They can do
+this because their arrays are dynamically typed. In C#, we have to make it a separate
+field of the node record/instance. But in C#, we can then use Array.length to find out
+how many entries are in the size table or the children array, whereas in ClojureScript,
+the 33rd entry of the size table (which itself is the 33rd entry in the children array)
+contains the length of the size table. Hence why ClojureScript's `last-range` function
+gets the 33rd entry (index 32) of the size table (which ClojureScript calls "ranges"),
+and decrements it to get an index, then it returns the "range" entry at that index.
+
+NOTE that there's one problem with that idea. The PersistentVector.Node class defaults
+to creating a 32-element array and filling it with nulls. So I can't rely on Array.length
+once I switch to using the PersistentVector.Node class for my FullNode implementation.
+Unfortunately, I think that's going to create a few problems eventually, because some of
+my algorithms relied on Array.length. There's probably a way to find the last non-null
+index of the array, but it might be a binary search. Oh well; I'll just have to write a
+function for that.
+
+Since PersistentVector -> RRBVector conversion is one-way (can't convert back in an O(1)
+fashion since there will probably be TreeNodes in the middle of the tree somewhere), I can
+say "When I create my *own* Node objects, they will have a real length. If I find a Node
+of length 32, I will check its last element for null. If the last element is null, then I
+have to find the last non-null index, and the length is that index + 1. But if the last
+element is NOT null, then this is genuinely a length-32 node." That length function will
+cost a bit of time, but it's an O(1) operation since it's bounded by 32 lookups (and
+probably a lot less than that).
+
+There might be performance implications here, though. But since I'm only looking at node
+length when I'm doing complicated operations like splits, it might be okay. TODO: measure
+the performance.
+
+ClojureScript pop implementation
+--------------------------------
+
+If vector is empty, throw an exception: "Can't pop empty vector"
+
+If vector contains one item, return the empty vector object.
+
+If the tail contains at least two items, make a new tail with one less item,
+and a new root node with the new tail (and a decremented vector count).
+
+Otherwise, we will have an empty tail so we need to promote a new tail. First,
+find the new tail with `(array-for cnt shift root tail (- cnt 2))`.                        TODO: Write notes about `array-for` function.
+Then call `tail-offset` and `pop-tail` functions to get a "new-root" value.                TODO: Write notes about `tail-offset` and `pop-tail` functions.
+
+Predicate called `overflow?` takes params root, shift, and cnt. Its algorithm:
+If the root is regular (meaning it's a full node), then:
+    return (cnt >>> 5) > (1 <<< shift)
+else:
+    let rngs = (ranges root), slc = slotCount (how many items in root, i.e. entries.Length)
+    return (slc = 32) &&
+           (shift = 5 || (overflow? (rightmost-node) (shift - 5) (rngs.[31] - rngs.[30] + 32))
+I can follow all of that except the math at the very end there... Oh, I see. It's calculating
+what the count would be if that last node were completely full. I don't yet see why that's
+correct, but I suppose that it is, since this code has been tested and used by lots of people.
+
+Okay, this `overflow?` predicate looks like it's calculating "If I pushed a *full* tail node
+down into the tree, would that make the root overflow and the tree gain height?" NO, wait,
+see below. For the regular case, it looks like "If I added a *single* item to the tail node,
+would that make the root overflow and the tree gain height?"
+
+Initial values of root, shift, and cnt are the ones from the root node. Makes sense so far.
+If root is regular, then we don't need any further math. We just need to know if count / 32
+is greater than 2**shift. I.e., if the tree has 1024 items, then root shift is still 5. And
+wait, wouldn't that need to be `>=` instead of `>`? Let's see. A full one-level tree will
+have 1024 items in it. A slightly-less-than-full one-level tree could have 993 or more items
+in it, and it would still be in a could-overflow state. (992, which is 31*32, would mean there
+was a single empty node slot on the right that could take a full 32-item node). 992 >>> 5 is
+31, but 1024 >>> 5 is 32. (1023 >>> 5 is 31, because it rounds down). So at shift 5, the
+`overflow?` function would be FALSE when cnt is 1023, or 1024, or even 1025! Wait, what? That
+seems... off to me. Is that because of counting the tail? In that case, the semantics of
+`overflow?` that I wrote earlier are wrong. They would actually be "If I added one more item
+to the tail, would that cause a height bump?". So (1024+31 = 1055) at a shift of 5 would NOT
+count as overflow, but 1056 WOULD count. Because at 1056 items, you have a full root of 32*32
+AND a full tail of 32. And so adding a single extra node at the end would cause an overflow.
+
+Okay, for a NON-regular tree, things are a little more complicated. We get the size table
+(called "ranges" in Clojure RRB, remember) and the slotCount of the root. If the slotCount
+is not 32, then return false from `overflow?`. If the slotCount is 32 and the shift is 5,
+then there's nowhere for a new tail and we return `true`. (Because we don't want to have
+to rewrite earlier nodes, even though they might have room for the tail's items -- so for
+efficiency, we don't bother checking.) But if the shift is 10 or higher, then there's
+another level of nodes that we should check. And so we look at the rightmost node of the
+current root, and see if it would overflow based on a certain count that is starting to
+make more sense now. Because it's (sizeTable.[31] - sizeTable.[30] + 32). Size tables are
+cumulative, so at any index i > 0, sizeTable.[i] - sizeTable.[i-1] will equal the number
+of total leaf items underneath entries.[i]. So we take the number of items in entries.[31]
+and add 32 to it, and see if that count would overflow. But I'm still not 100% certain this
+is correct. I'll play it out in my mind, with a tree of branching factor 4.
+
+Root:                    R
+Middle:    x        x        x        x
+Bottom: 4 3 3 4, 4 3 3 4, 4 3 3 4, 4 3 3 4.
+
+Size table for middle: 4,7,10,14 at each node.
+Size table for root: 14,28,42,56. We're 8 items short of a full 64.
+Check root. slotCount is 4. Shift is NOT 2, so we loop. New root to
+check is fourth x. Shift is now 2, and count is (56 - 42 + 4) = 18.
+(If that had been a regular node, count would have been (58 - 42 + 4) = 20).
+So now we check the loop again. If it had been a regular node, it would ...
+
+Wait, this still feels wrong. Go one MORE level up, with four R nodes.
+The one-level-up root, call it T, has size table 56,112,168,224. If the last
+R-rooted tree had been regular (with 64 in it), that would be 56,112,168,232.
+The regular math would then get (64 + 4 = 68) for the count to pass. (And count
+isn't used in the non-regular part, so we can ignore that). Now we're checking
+two levels up, so shift is 4. (count >>> 2) is 17, and (1 <<< 4) is 16, and the
+`overflow?` check DOES return true. Okay, the math is right.
+
+`overflow?` is used in the `conj` operation (which we'll call `push`) and in the `splice-rrbts`
+operation (which I believe is concat/Append). In splice-rrbts, the count is more complicated.
+It is (count vec1) + (vec1.tail.Length - 32). And if that does NOT overflow, then vec1's tail
+gets folded into the root (which I assume means "push tail down", but we'll get to `fold-tail`
+soon), and then splicing happens. If it DOES overflow, then it looks like a new root gets
+created for vec1 before the splice operation happens.
+
+Phew. So much for `overflow?`. It looks right, and maybe I'll end up using it.
+
+
+Next operation: index-of-nil. (There's also index-of-0, but it's not actually used). This
+does a binary search through an array to find the first nil item. That's not great for cache
+locality, I think. Anyway, we don't need it, as the point seems to be to find the first place
+where there isn't a value, and we can use Array.length for that.
+
+Moving on, now we find first-child and last-child. Easy.
+
+Then there's remove-leftmost-child, replace-leftmost-child, and replace-rightmost-child.
+We'll get to them, but them *seem* straightforward. But now there's `new-path*`. The `*`
+at the end usually is like an `'` in F#, just a "second version of this function" naming
+convention in Clojure. `new-path*` takes a shift and a node. It starts by making an array
+of the same length as the node (regular or not regular). Then it builds a size table of
+size one, with contents that are the length of the passed-in node's entries. (But wait,
+won't that always return 33 the way it's called? I'm confused about the way it's written).
+But wait, there's a `new-path` (without a `*` in the name) in `trees.cljs`. That might be
+the one I actually want. The `new-path*` function seems to only get called during the
+splice operation, which means it's kind of complicated.
+
+The `new-path` function in `trees.cljs` takes a tail, an "edit" flag (that's used to
+distinguish transient from permanent VectorNode instances), a shift, and a current-node.
+The "tail" param is just the "items" array of the tail node, and `current-node` starts out
+as the actual tail *node*. The shift usually starts as 5 below the current shift...? Or one
+level down from the root? I'm not sure about this. Anyway, `new-path` works as follows:
+
+1) Is the `tail` 32 items long?
+   1a) Yes. Start loop s=0, n=current-node.
+            If s = shift, return n.
+            Else
+                let newNode = (new VectorNode)
+                Set newNode's first child to n.
+                Recur loop s=s+5, n=newNode
+   1b) No. Start loop s=0, n=current-node.
+           If s = shift, return n.
+           Else
+                let newNode = (new RRBNode, with new sizeTbl)
+                Set newNode's first child to n.
+                Set newNode's size table to [|tail.Length|].
+                Recur loop s=s+5, n=newNode
+
+And that's `new-path`. It makes a chain of nodes from 0 to `shift`, with the tail at 0. Easy.
+
+Next up: looking at `push-tail`. It takes shift, count, root-edit, current-node, tail-node.
+
+1) Is the current-node regular? (A full tree, that is?)
+   1a) Yes. Clone the children array of current-node. Make a new node with those children.
+       Loop with n=(new node), shift=shift
+            let subIdx = (cnt-1) >>> shift &&& bitMask (0x1f)
+            If shift is 5, set tail node at subidx
+            Else, if subidx has NOTHING in it, set it to (new-path tail.Items, edit, shift-5, tail)
+            Else (subidx has SOMETHING in it):
+                let child = (newNode.[subidx])
+                let newChild = (clone of child)
+                newNode.[subidx] <- newChild
+                Recur loop n=newChild, shift=shift-5
+        When done with looping, return newNode.
+   1b) No. Current node is RRBNode.
+       Clone children array and make new node with the cloned array.
+       let li = (node entryCount) - 1. I think that's `li` for "Last item".
+       let cret = something complicated below:
+            if shift = 5 then nil
+            else
+                let child=node.[li]
+                let ccnt = if li > 0 then (sizeTbl.[li] - sizeTbl.[li - 1]) else sizeTbl.[0]
+                // Why would li be <= 0? Well, if (node entryCount) was 1.
+                if ccnt <> (1 <<< shift) then
+                    (rec-call) push-tail (shift-5) (ccnt+1) root-edit child tail-node
+        if cret <> nil then
+            arr.[li] <- cret
+            sizeTbl.[li] <- sizeTbl.[li] + 32
+        else
+            arr.[li+1] <- (new-path tail-node.items root-edit (shift-5) tail-node)
+            sizeTbl.[li+1] <- sizeTbl.[li] + 32
+            arr.Length <- arr.Length + 1  // In F# this will be automatic
+        Whatever happens, return newNode.
+
+That looks complicated, but I think I can explain it in simple words. Next time.
+
+In a full node, get the radix index of the last item. (At cnt-1).
+... Wait, does cnt include the tail, or not? Let's look. The use of `push-tail` is inside
+the `conj` (or "Add" in C#) operation. It will be used if the root does *NOT* overflow, as
+part of the return value which looks like:
+
+Vector. (cnt+1) shift (push-tail shift cnt (root.edit) root tail-node) new-tail meta nil
+(params)  cnt   shift            root                                   tail  mutable hash
+
+So the return value of push-tail is the new root node. And it gets passed the total count
+of the vector, including the tail length.
+
+So push-tail does the following:
+  In a full node, get the radix index of the last item. (At cnt-1). This will be an
+  index of ... TODO: Write more here
+
+
+IDEA for helper program
+=======================
+
+Take a tree description in a text format, and produce a .dot file that graphviz can draw.
+Text format will look like this:
+
+[4 2 3] [1 3 4] [4 3 4 4] T3
+
+[ [4 4] [3 4 3] ] [[3 4][4 4 3 3]] T4
+
+Numbers represent leaf nodes of that length. Brackets enclose nodes that are grouped under
+a common parent. Brackets can be nested to represent a deeper tree. The root node's brackets
+are implied and can be omitted. There is an optional T# token at the end, which represents
+the tail. (The # is a number and, of course, represents the tail's length). If the T# token
+is absent, the tree will be drawn without a tail.
+
+The leaves will be represented as containing numbers, counting up from 0 at the left. These
+numbers are, of course, their indices in the tree. Any node that is not full will be represented
+with a size table, which will be accurately populated. The size table, rather than being
+represented off to the left of the node as L'orange depicts it in his thesis, will be represented
+"within" the node. That is, leaf nodes contain their indices, and non-leaf nodes contain the
+size table entries for that node.
+
+
+An experiment to try
+====================
+
+Experiment with MailboxProcessor and transients. See if it can be safe. If the MailboxProcessor
+has to yield control (it can't have control taken away by the same thread), then it might be
+safe after all.
+
+
+Alternate idea for splitting, good for WindowedSeq and the like
+===============================================================
+
+Instead of splitting the tree, calculate all the leaf splits, then write the trees above the
+leaf splits. Good for doing lots of splits; especially good if the splits are multiples of 32
+(or whatever the branching factor is if it isn't 32). If I write this function, document it
+as being especially efficient when splitting into multiples of 32.
+
+
+Useful function idea
+====================
+
+Maybe an indexPath function might be useful? It would produce a list (or an array, perhaps) like:
+[|idxAtRoot; idxAtNode1; idxAtNode2; idxAtLeaf|]. Could be useful for checking, say, that a node
+is the leftmost in its path (until the root, where it might not be).
+
+
+Splitting
+=========
+
+Sample split: ![Split example](split-example.png)
+
+For splitAt function, look up that index, and the index to its immediate left. The given idx will
+become the first element of vector B, and the (idx-1) position will be the last element of vector A.
+(The result is A,B such that (RRBVector.append A B) produces the original vector). We ultimately
+need to get three leaf nodes: the one belonging to idx (will become firstLeafB), the one belonging
+to idx-1 (will become newTailA), and the leaf immediately left of newTailA. If firstLeafB and
+newTailA are the same leaf (which will happen quite often), it gets split so that they are separate
+leaves. If they are already separate leaves, they don't need to be rewritten.
+
+Seven possibilities for what the split-index position is:
+1) idx = vec.Length. Simple:
+    A = original vector
+    B = empty
+2) idx > vec.tailOffset
+    A = original vector with unchanged root and new tail (with first part of old tail)
+    B = tail-only vector (no root)
+3) idx = vec.tailOffset
+    A = original vector with root |> promoteNewTail (old tail discarded from A)
+    B = tail-only vector with old tail (unchanged) and no root
+4) idx = 0. Again, simple:
+    A = empty
+    B = original vector
+5) idx < leftmostLeaf.items.Length. Split that leaf.
+    A = tail-only vector with left half of that leaf
+    B = original vector with that leaf snipped a bit (and new path to root from leftmost leaf)
+6) idx = leftmostLeaf.items.Length. Do NOT split that leaf.
+    A = tail-only vector with that leaf (unchanged) as the tail.
+    B = original vector minus that leaf (and one fewer entry in leftmost node one level up, plus new path to root)
+7) idx > leftmostLeaf.items.Length and idx < vec.tailOffset. This one is actually a bit complicated.
+Here we need to find the three leaves mentioned earlier: lastLeafA, newTailA, and firstLeafB. It will often
+happen that newTailA is in the same original leaf as firstLeafB, in which case that leaf gets split to produce these
+two leaves. lastLeafA is always its own leaf, though: once newTailA is identified, go one leaf left to find lastLeafA.
+Then we produce a new path to the root from lastLeafA, and a new path to the root from firstLeafB. (newTailA does
+not have a path to the root). Some opportunities for efficiency occur here, if lastLeafA had a separate path-to-root
+than newTailA did. In particular, if newTailA's path to the root would have been only 1-item nodes until we get to a
+2-item root, then that will become a 1-item root after removing newTailA, and thus the new tree will have one fewer level.
+
+
+Idea for shortenVector function
+===============================
+
+if nodeSize (vec.root) = 1 then
+    { vec with root = vec.root |> getChildAt 0; shift = vec.shift - Literals.blockSizeShift }  // That's it. No other things (tail offset, length, etc.) need changing.
+else
+    vec
+
+
+Idea for insertions
+===================
+
+Once transients are implemented, we could let transients store notes about which
+leaf nodes have been split by insertions and need rebalancing. Then once you've
+done a lot of insertions, you can rebalance more efficiently because you know
+where to go. Also, user documentation should mention that if you're inserting
+repeatedly into the vector at lots of different places, it's most efficient to
+do so in a transient, then persist the transient once you're done. (The "persist"
+function will perform a rebalancing if the transient says it needs to be rebalanced.)
+
+We should also expose a "rebalance" function on persistent and transient vectors,
+though people won't know when to call it. If we call it "optimize" then people
+might call it when there's no need. Maybe it should be called "optimizeAfterMultipleInsertions"
+to hint at its use? Gotta figure out a good name.
+
+
+Thoughts about merging
+======================
+
+A few definitions before we begin:
+
+  - BS = block size. 32 in most nodes, 4 during development.
+  -  e = error factor. Here, 2. As a general rule, nodes should have between (BS-e) and BS children.
+         If they have fewer than (BS-e) children, they will likely be merged during a rebalance.
+  - MC = merge-candidate node. In the left tree, that is the lowest rightmost
+         non-leaf node of the right spine. In the right tree, it is the lowest
+         leftmost non-leaf node of the left spine.
+  - NS = node size. How many direct children does it contain? NS <= BS at all times, and usually
+         NS >= (BS - e). If NS < (BS - e), a node will be considered for merging.
+  - CS = cumulative size of a node. The node size of all the node's children added together. A node
+         that is *completely* filled will have CS = BS^2.
+
+When merging two trees, the left tree's tail will need to be handled specially.
+
+One way it could be handled would be to simply push it down into the tree, then merge.
+But there might be an optimization to be had. If the left MC node has less than BS items,
+then obviously pushing the tail down would have meant adding it to the MC node. But if
+the MC node contains BS items, but its CS is such that it would be mergeable (that is,
+its optimal distribution is of rank < (BS - e)), then we can handle it specially.
+
+Okay, I need to define a node's "rank" as I just used it. A node's rank is the smallest number
+of children it can have to form a complete distribution of its children's contents. Let me
+illustrate. A node that looks like [4 4 4 4] is obviously full. The node [4 4 4 3] could have
+one more grandchild, but it could not possibly end up with three children by any redistribution
+of grandchildren. Its rank is 4. The node [2 3 3 2], though, has just 10 grandchildren (its CS
+is 10). It contains 4 children, but by redistributing two items from its second child to its first,
+and then merging its second child (which now has 1 item) with its third (which has 3), it could be
+turned into [4 4 2], which contains 3 children. So the [2 3 3 2] node has rank 3. In worst case,
+it could be equivalent to [1 1 4 4], where looking for the 3rd index would point you to child 0 when
+you really wanted child 2, and you'd do 2 extra search steps in the radix search. In the BS=4 case
+during development, we'll allow a node to have 1 more child than its rank, so the [2 3 3 2] node with
+rank 3 wouldn't necessarily trigger a rebalancing. But if a node has 2 more children than its rank,
+then a rebalancing will be triggered: a node that looks like [2 2 1 3] has rank 2 because it only has
+a total of 8 grandchildren, and that could be rebalanced into [4 4]. Now, the question is how
+aggressively to rebalance. Do we rebalance to [4 4], or to [4 1 3] in this case? Another possible
+rebalancing would be [2 2 4], actually; it all depends on how we decide to "skip" nodes as we scan
+for the first node on which to start rebalancing. The first possibility would be to skip nodes whose
+size is (BS - e). (NOTE: The Bagwell/Rampf paper mentions skipping nodes of size (BS - e/2) during
+rebalancing, because you can always guarantee that there's at least one node to the right of those
+that will be smaller. But as far as I can tell, you can actually skip nodes of (BS - e), not just
+node of (BS - e/2). So with BS = 32 and e = 2, you don't just have to skip 31-sized nodes, you can
+also skip 30-sized nodes as well. Let's look at this and double-check it.)
+
+If you've got BS = 4 and e = 1, then [3 3 3 3] is acceptable since its rank is 3. In fact, [2 2 2 3]
+is still acceptable since its rank is still 3! (It would rebalance into [4 4 1] at best). So in order
+to have e = 2 and be forced to rebalance, the *average* size of each child must be (BS - (e+1)) or less.
+Therefore, if we skip over the (BS - e) or greater children, here's what we could have:
+
+[3 3 ...] at this point we've assigned 6 numbers, and we know there are no more than 8 since we're about
+to rebalance... [3 3 1 1] is the only way to assign this. And there are the two 1's.
+
+With BS = 32 and e=2, then with 1024 items you get 32 slots as the optimum. 992 is 31 slots (31*32)
+optimum, and 993 means a rank of 32 (because you could fill 31 slots, but you'd have 1 left over). Likewise,
+960 is a filled 30-rank node, and 961 goes to rank 31. And 928 is a rank-29 node, but 929 goes to rank 30.
+So in order for a node to require rebalancing at e=2, it must have no more than 928 grandchildren total,
+otherwise our "skip rebalancing if e=2" formula would have been acceptable. Now, if we're skipping nodes of
+size (BS-e) = 30, then the "most skipping" scenario we could see would be to have 30 grandchildren in the
+first 30 slots, for a total of 900 used up. Now there are two slots left, and 28 grandchildren to fill them.
+Not only does this constitute a situation where a rebalancing is possible, it even has room for one more full
+node to come join in at the end -- say, a full tail that needed to squeeze in.
+
+So if a vector's rightmost lowest twig node was [30 30 30 ..x30 27 1], that's 32 slots but 928 grandchildren
+for a node of rank 29. That's more than 2 off from 32, so this requires rebalancing. And let's say the tail
+needed to slide in there as well. You'd get [30 30 30 ..x30 28 (tail)]. Minimal rewrites at this level, but
+still an acceptably full node for radix searching purposes.
+
+But wait! A third look at L'orange's thesis has finally made me understand that when they talk about e=2,
+they're talking about the total error across the *two* merging nodes, i.e. BS*2 slots. Which is kind of
+equivalent to e=1 in the single-node case. So let's reevaluate. If you have merged two nodes when BS = 32,
+the max rank is 64. If e=2, then 62 is acceptable and 61 is not. 61*32 = 1952, split between both nodes.
+If you are skipping nodes of 31 (BS - e/2) then we already know it will work. But what if you are skipping
+nodes of 30? Then you could have 30*32 = 960 on the left, which leaves 992 on the right. That just so
+happens to be 31*32, so you could have [30 30 ... x32] on left and [31 31 ... x32] on right. Add in a tail
+and there's just nowhere for it to go! Therefore when we're merging two nodes, we want to skip only nodes
+of 31 or 32, and the first node with 30 is our merge candidate.
+
+(TODO: Though there might be some other heuristics, like "find a merge with fewer total nodes involved in
+the merge". If our algorithm for finding possible merges can find multiple valid starting points in a single
+O(N) pass over the two nodes (so N = BS * 2), then maybe it's worth checking multiple candidates. I feel like
+there's a possibility there:
+
+32 32 31 30 31 29 24 21 16
+         ^
+ 0  0  1  2  1  3  8 11 16   <-- How many items short of 32 is this node?
+
+ 0  0  ?  6  5  4  3 >2      <-- How many numbers starting with this one must I sum up to reach >= 32?
+
+         41 39 38 35         <-- Total if I sum up those numbers
+
+
+Now a near-pathological case that would be bad news for the naive algorithm. We have 30*32 = 960 nodes on the
+left, and the right is just short enough to push to e=3. 960 could be 30*32, but we actually have a 30 followed
+by a BUNCH of 32's...:
+
+30 32 32 32 32 32 (... 20 of 'em in total ...) 32 32 32 32 32 30 30 30 30 30 30 30 30 30 20
+
+ 2  0  0  0  0  0   ...   ...   ...   ...  ...  0  0  0  0  0  2  2  2  2  2  2  2  2  2 12
+
+ X -1 -1 -1 -1 -1   ...   ...   ...   ...  ... -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ ^\-- where X ~= 30 or so?
+
+32 30 30 30 ...                                               30 28 26 24...  <-- Total if I sum up those numbers
+
+(-1 means "not achievable from here").
+Here our algorithm does a lot of work, but X = 32, which means we have to copy the ENTIRE node.
+But what if the right had been just a teeny bit shorter, like 18 instead of 20? (Total 958):
+
+30 32 32 32 32 32 (... 20 of 'em in total ...) 32 32 32 32 32 30 30 30 30 30 30 30 30 30 18
+
+ 2  0  0  0  0  0   ...   ...   ...   ...  ...  0  0  0  0  0  2  2  2  2  2  2  2  2  2 14
+
+32 31 30 29 28 27   ...   ...   ...   ...  ... -1 -1 -1 -1 -1 10 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ ^\-- where X = 32
+
+34 32 32 32 32 32 32 ...                                32 32 32 30 ...
+
+So the algorithm is:
+
+1) Calculate the "missing nodes" value of each slot (32 - n where n is that slot's node size).
+2) Find the starting point, the first number <= 30 (or whose "missing nodes" value >= 2).
+3) From that start point, start adding "missing nodes" values together and keeping track of:
+   a) how many numbers have been added together so far, and
+   b) the running total.
+4) Once the running total is >= 32, look at how many numbers it took to get there. That's the
+   length of our candidate window.
+5) Now start, one by one, removing numbers from the left of the candidate window. As you do so,
+   subtract them from the running total. If it stays >= 32, then it's safe to drop that number.
+   If the total dips below 32, then you've found the first number you can't drop, and therefore
+   you've found a local optimum. (Can't drop the first one without going below 32, and we already
+   know that the last one is what put us over 32 in the first place).
+
+BTW, I've asked about this algorithm at http://cs.stackexchange.com/q/64305/51360. Let's see if
+anyone offers suggestions for improvement.
+
+(NOTE: The Stucki/Rampf/Ureche/Bagwell paper, which describes the Scala implementation, mentions
+that rebalancing in Scala was more aggressive, favoring longer concats to gain faster index speeds.
+That's why the Scala implementation rebalances all nodes to BS size when it can. I'm going to choose
+to favor fast concats and maybe have slightly longer index speeds, because I think that will gain
+something in the insertion cases, discussed below, as well.)
+
+
+Merging notes from Sunday October 23rd
+--------------------------------------
+
+Algorithm for doing the merge once we've decided which slots we'll merge:
+
+let arrs = (parameter from outer function)
+let rec loop i j acc soFar =
+    let len = arrs.[i] |> Array.length
+    let count = min (len - j) (Literals.blockSize - soFar)
+    Array.blit arrs.[i] j acc soFar count
+    let count' = soFar + count
+    if count' >= Literals.blockSize then (acc, i, j, count) else  // TODO: Figure out return value we need
+    loop (i+1) 0 acc count'
+loop i j (Array.zeroCreate Literals.blockSize) 0
+
+Something like that, anyway. The general idea is we have an array of arrays (I'll type it as a list of
+lists because that's easier to type, but in the actual code it'll be an array of arrays), e.g.:
+
+[[1 2 3] [4 5] [6] [7] [8 9] [10 11] [12 13] [14 15 16]]
+
+(Semicolons omitted for ease of typing & reading). Now we have two indices, i and j. i is the index into
+the outer array, and j into the inner array. So the index (i=0, j=2) would select item 3, and (i=1, j=1)
+selects item 5.
+
+QUESTION: What if the above example was actually as follows?
+
+[[1 2 3] [4 5 6] [7] [8 9] [10 11] [12 13] [14 15 16]]
+
+Here the [1 2 3] and [4 5 6] nodes will be skipped during rebalancing, so we'll only start with the 7 node.
+With our clever heuristic, it would pick [8 9] and [10 11] for merging. But with a non-clever heuristic, it
+would have picked [7] and [8 9] to merge. Which would be better: to merge those two nodes into one and stop,
+even though the resulting node is short of the block size? Or to keep going and make one BS-sized node by
+splitting the next node in two? In this case, that would look like [7 8 9 10] [11], so there's no particular
+win here. It's probably best to merge just the nodes selected by the merge plan, and stop there, even at the
+cost of creating a merged node that would be short. So [7 8 9] [10 11] is probably better.
+
+Now, the "clever" heuristic would have picked [8 9] [10 11] to merge this time, making [8 9 10 11]. Then the
+next time this node was rebalanced, it would pick [7] [8 9 10 11] [12 13] to merge into [7 8 9 10] [11 12 13].
+A less-clever heuristic would have picked [7] [8 9] the first time, then [10 11] [12 13] the second time.
+Fewer copies in total. So our clever heuristic doesn't *always* win, and it's worth profiling it with a bunch
+of randomly-messed-up trees to tell which is better. Still, for now I'll keep the "clever" heuristic because
+it is quick and simple and yet does produce at least a *local* optimum.
+
+NOTE: If you have two trees with an e=1 node at the bottom, it's possible that merging them might produce a
+node whose error is 3. If the two nodes are 961 each (the minimum for e=1 in a BS=32 tree), then merging the
+two makes 1922, which is e=3. (1920 would be e=4). And MAYBE one of those nodes was previously sliced -- we
+are NOT plannning to rebalance after slicing -- so it's possible that during merges, we might get an e=4
+situation. If that occurs, we'll need to deal with it in rebalancing. One possibility would be to rebalance
+twice, each time reducing e by 1. Possible. Another would be to make *two* rebalance plans, but that might
+be tricky since after the first copy the indexes of the later nodes would be lowered. Possible to account for,
+though. Or look for a single copy group that reduces by 2 (so you're looking for a total of 64 missing nodes)
+and only if that's not found do you move to two merge groups that reduce by 1 each. Hmm... nah. Keep it simple
+and look for two groups of 1 each. Then when you're doing the second rebalance merge, shift the indices down
+by 1 to account for the shift. And WRITE UNIT TESTS, since there's a lot of potential for off-by-one errors.
+
+
+Merging notes from Sunday February 12, 2017
+-------------------------------------------
+
+Decided to write the merge functions *simply*, using an intermediate array that will eventually be thrown away.
+This may not be as optimal speed-wise, but it's much easier to get right, and that's the important thing.
+If I manage to get this right, then I can try rewriting the merge functions to merge directly and see if the
+unit tests all still pass.
+
+Here are a bunch of calculations I did to see when the L+tail+R merge scenario would be reduceable into M*2:
+
+M=32 ; M^2=1024 ; M-1 = 31 ; (M-1)^2 = 961 ; (M-1)^2 - 1 = M(M-2) = 960
+M=4  ; M^2=  16 ; M-1 =  3 ; (M-1)^2 =   9 ; (M-1)^2 - 1 = M(M-2) =   8
+
+In the below, I call the left side A instead of L, and the right side B instead of R. Tail is T. Also, the
+notation is: A = all the items in A (up to 1024 for a full node). |A| = the node length of A (32 if full).
+
+Consider where A is [(31x31); a], then T is (32), then B is [(31x31); b].
+If a + b > 32, can't fit the tail in. ... no, wait.
+If a >= 31 and b > 0, can't fit tail because we'll have skipped all the way to b, and we already know in
+this scenario that b > 0.
+If a = 30, can we fit? YES. We'd slide 2 items into a from the tail, so we need to fit 30 items into the
+31 31-sized nodes of B. So we can fit regardless of what size b is.
+
+So if A < (31*32), then we're guaranteed to be able to fit the tail in, so A+tail+B will be <= 64 nodes.
+BUT the same doesn't hold for B. If B was, say, 31*32, we could potentially skip all the nodes of B.
+But if B was (31*32) - 1, then that means there's at least one node of size 30, which we'll find. So a
+tail of length 1 could certainly fit into there. If B is (31*32) - 2, then there's either two 30 nodes
+or one 29 node, and either way, we can fit a tail of 2 for sure. So if B is M(M-1) - |T|, then the tail
+will certainly fit into B.
+
+And if we make the calculation symmetrical for A, then we simplify things a bit. Because the calculation
+for A also becomes A <= (31*32) - |T|, or (A+|T|) <= M(M-1). And the same thing holds for B. So our math
+for the "can the tail fit?" question is:
+
+let M2minusM = M * (M-1)  // Make this a literal
+let canFitTail = aLen < M || bLen < M || (aCnt + tLen) <= M2minusM || (bCnt + tLen) <= M2minusM
+
+Now, if we can fit the tail, we'll use (Array.append3 A tail B) to make the combined node, then call
+the standard "rebalance" algorithm to balance the combined node down. But if we CAN'T fit the tail,
+then for one thing we know that |A| = |B| = M, so there's no point in rebalancing anything. Instead,
+we go one level UP and do the same algorithm with a "tail" length of 1.
+
+Therefore, we want TWO algorithms for the ATB case:
+  - One where we *know* that it'll fit, which returns (A',B')
+  - One where we do the size checks and return ((A',B'), T option)
+      Where the T option is either None or Some (Node(T_orig))
+
+let rebalanceInPlace combined =
+    let mergeStart = combined |> Array.tryFindIndex (fun node -> nodeLen node < 31)
+    if Option.isNone mergeStart then combined else
+    let mutable gapsFilled = 0
+    let mutable mergeIdx = Option.get mergeStart
+    while gapsFilled < M do  // OR: while gapsFilled < M && mergeIdx + 1 < Array.length combined do
+        let n = M - Array.length combined.[mergeIdx]
+        let part1,part2 =
+            if Array.length combined.[mergeIdx + 1] <= n then
+                gapsFilled <- M   // Ensure that we'll exit the loop this time through
+                combined.[mergeIdx + 1], [||]
+            else
+                combined.[mergeIdx + 1] |> Array.splitAt n
+        combined.[mergeIdx] <- Array.append combined.[mergeIdx] part1
+        combined.[mergeIdx + 1] <- part2
+        gapsFilled <- gapsFilled + n
+        mergeIdx <- mergeIdx + 1
+    // Now we MAY have mergeIdx pointing at an empty node, if we went through the true branch
+    // of that if statement in there. If that's the case, we need to shift every subsequent node
+    // down by 1 index in combined, otherwise we're pretty much done here
+    if combined.[mergeIdx] |> Array.length <= 0 then
+        Array.blit combined mergeIdx combined (mergeIdx + 1) (Array.length combined - mergeIdx)
+        // TODO: Verify all the numbers above to make sure I'm not making any off-by-one errors
+    combined
+
+-OR- (better, possibly?)
+
+let shift a aIdx b =
+    let aLen = Array.length a
+    let bLen = Array.length b
+    let aCnt = aLen - aIdx   // aN in notes
+    if aCnt + bLen > M then
+        let bCnt = M - aCnt
+        let dest = Array.zeroCreate M
+        Array.blit a aIdx dest    0 aCnt
+        Array.blit b    0 dest aCnt bCnt
+        dest,bCnt
+    else
+        let dest = Array.zeroCreate (aCnt + bLen)
+        Array.blit a aIdx dest    0 aCnt
+        Array.blit b    0 dest aCnt bLen
+        dest,-1   // -1 signals STOP to the merge algorithm
+
+let rebalance combined =
+    let mergeStart = combined |> Array.tryFindIndex (fun node -> nodeLen node < 31)
+    // TODO: Write a "safe findIndex" that returns -1 instead of None, or else simply trust that the caller checked before rebalancing? Nah, that's a bit too dangerous.
+    // TODO: Or else change this function to "execute merge plan". Yeah, that could work. Then we're handed the combined array *and* the mergeStart and mergeLen values.
+    if Option.isNone mergeStart then combined else
+    let mergeStart = Option.get mergeStart
+    let destLen = Array.length combined - 1
+    let dest = Array.zeroCreate destLen
+    Array.blit combined 0 dest 0 mergeStart
+    let mutable workIdx = mergeStart
+    let mutable i = 0
+    while i >= 0 && workIdx < destLen do
+        let arr,newI = shift combined.[workIdx] i combined.[workIdx + 1]
+        dest.[workIdx] <- arr
+        i <- newI
+        workIdx <- workIdx + 1
+    Array.blit combined (workIdx+1) dest workIdx (destLen - workIdx)  // TODO: Double-check these indices against any possible off-by-one errors
+    dest
+
+And then:
+
+let splitAtM combined =
+    let cLen = Array.length combined
+    if cLen > M then
+        combined |> Array.splitAt M
+    else
+        combined,[||]
+
+let merge a b =
+    // TODO: Write the doWeNeedToRebalance function. There's a formula in my notes somewhere.
+    let shouldWeRebalance = doWeNeedToRebalance a b
+    let result = if shouldWeRebalance then
+                    Array.append a b |> rebalance
+                 else
+                    Array.append a b
+    splitAtM result
+
+let merge3WayWhereWeKnowThereIsRoom a tail b =
+    let shouldWeRebalance = doWeNeedToRebalance3 a tail b
+    let combined = if shouldWeRebalance then
+                       append3 a tail b |> rebalance
+                   else
+                       append3 a tail b
+    splitAtM result
+
+let merge3Way a tail b =
+    let aLen = Array.length a
+    let bLen = Array.length b
+    let tLen = Array.length tail
+    if aLen < M || bLen < M || (treeCount a) + tLen <= M*(M-1) || (treeCount b) + tLen <= M*(M-1) then
+        (merge3WayWhereWeKnowThereIsRoom a tail b), None
+    else
+        (a,b), Some [|tail|]   // TODO: Is that the function signature we want? Also, [|tail|] should really be a node constructor here.
+
+How insertions with splitting factor in
+---------------------------------------
+
+Now let's look at a node that's been split in the middle by some insertions. So [32 32 32] became [32 17 16 32].
+This node's rank is actually 4, because it's equivalent to [32 32 32 1], so no rebalancing needed -- BUT there's
+some definite inefficiency going on in the index searching. But let's expand this a bit:
+
+[32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32], 20 nodes of 32 so rank 20.
+
+First insertion:
+[32 32 17 16 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32], 19 nodes of 32, plus 33 more in 2 nodes, so rank 21 because CS = (32*20) + 1. And there are 21 slots, so e = 0.
+At this point, BTW, any radix searching in slots 4 or later is probably off by 1.
+
+Second insertion, in one of the two "short" nodes:
+[32 32 18 16 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32], 19 nodes of 32, plus 34 more in 2 nodes, still rank 21 because CS = (32*20) + 2. And there are 21 slots, so e = 0.
+Radix searching in slots 4 or later is still off by 1.
+
+Third insertion, elsewhere:
+[32 32 18 16 32 32 32 32 32 32 32 17 16 32 32 32 32 32 32 32 32 32], 18 nodes of 32, plus 34 more in 2 nodes, plus 33 more in 2 nodes. still rank 21. And there are 22 slots, so e = 1.
+
+Fourth insertion... but this time it's in slot 1, just left of that 18.
+We look at the two nodes and rebalance *just those two* to be average: 32+18 = 50, so slide 7 items right (then add the inserted) to make:
+[32 26 25 16 32 32 32 32 32 32 32 17 16 32 32 32 32 32 32 32 32 32], 17 nodes of 32, plus 67 more in 3 nodes, plus 33 more in 2 nodes. still rank 21. And there are 22 slots, so e = 1.
+
+Fifth insertion... elsewhere so we can't just slide things around.
+[32 26 25 16 32 17 16 32 32 32 32 32 17 16 32 32 32 32 32 32 32 32 32], 16 nodes of 32, plus 67 more in 3 nodes, plus 33 more in 2 nodes, plus 33 more in 2 nodes. still rank 21.
+And there are now 23 slots, so e = 2. We still don't *have* to rebalance.
+
+Sixth insertion, elsewhere, and now things have GONE TOO FAR:
+[32 26 25 16 32 17 16 32 32 17 16 32 32 17 16 32 32 32 32 32 32 32 32 32], 15 nodes of 32, plus 67 more in 3 nodes, plus 33 more in 2 nodes, plus 33 more in 2 nodes, plus 33 more in 2 nodes. still rank 21.
+But there are now 24 slots, so e = 3, and it's time to rebalance.
+
+Our selection chooses the 26. 26 + 25 = 51, not yet reduced. 26 + 25 + 16 = 67, which still takes 3 nodes ([32 32 3]). Keep going. Next is a 32, then a 17, and now we have a rebalancing plan:
+Take the [26 25 16 32 17] nodes and turn it into (as many 32's as possible, plus leftovers). 26 + 25 + 16 + 32 + 17 = 116. That's 32*3 + 20, so we'd end up with:
+         [32 32 32 20]
+
+And now our node looks like:
+[32 32 32 32 20 16 32 32 17 16 32 32 17 16 32 32 32 32 32 32 32 32 32] = 646 nodes. Just what we had before, rank 21, but now it's length 23, and we're done rebalancing. There are
+certainly still inefficiencies here, but we've decided to leave them alone since we focus on fast rebalancing. This does mean that radix searches near the end of this array are
+likely to be 3 off from their optimum, but given the efficiency of linear searches in a radix size table, being 3 off is probably not going to cross a cache line so it'll still be fast.
+
+UPDATE: I've re-read the Bagwell & Rampf paper. Turns out that e=2 is only while doing merges of two trees. Doing a rebalance of a single tree means that we want e=1, otherwise when you
+try to merge two trees you could have e=2 + e=2 = e=4 on the combined, and that leads to a kind of nasty rebalance calculation. So when we do insertions, we'll rebalance the single node
+based on e=1, which means that we would have rebalanced after the fifth insertion, not the sixth, in the above example. Still means a not-very-frequent rebalancing on insert, so I'll call
+that a win.
+
+
+Let's think about inserts some more. If we have a leaf with 32, and its parent has room to split a node, is it better to split evenly, or to split pretty much at the insertion point?
+
+Let's use a node of size 16: [a b c d e f g h i j k l m n o p]
+
+If we insert X at index 3, here's what splitting evenly would look like:
+[a b c X d e f g h] [i j k l m n o p]
+
+and here's what splitting at the insert point would look like:
+[a b c X] [d e f g h i j k l m n o p]
+
+or
+[a b c] [X d e f g h i j k l m n o p]
+
+Which of these is better for the tree? Either way we have to copy all the nodes into two new arrays; no getting around that. So the real question is
+future inserts. If we are planning to insert more items immediately after X, in the first case we get:
+
+[a b c X Y d e f g h] [i j k l m n o p]
+[a b c X Y Z d e f g h] [i j k l m n o p]
+
+9 nodes were copied for inserting Y, then 10 nodes were copied for inserting Z. In the second case:
+
+[a b c X Y] [d e f g h i j k l m n o p]
+[a b c X Y Z] [d e f g h i j k l m n o p]
+
+Copying 4, then 5. Second case wins for future inserts at the same point. What about searching? Well, with a small initial node it's more likely that
+the index just after the small one will be picked (and be off), but that's a very localized effect. Mostly the search indexes that are affected will be
+after the node pair, no matter what it looks like -- and so they'll find 17 nodes where they expected 32, leading to off-by-one no matter what.
+
+So if we expect lots of insertions, then splitting at the insertion point is better. And it's no worse for almost every other scenario.
+
+
+More thoughts about insertions
+------------------------------
+
+n=64, m=1. There are 64 nodes. The first 63 contain at least 31 slots, and the last node contains 1 slot.
+That means they contain 1954 slots (1953 = 63*31, plus the singleton) at most. The optimal packing of
+1954 into 32 is 61.0625, meaning 61 full nodes and 2 slots in the 62nd node. Therefore we don't need
+rebalancing here, because e=2 for this scenario. And if you subtract ANYthing from any of those nodes,
+then the formula still won't require rebalancing and yet there will be at least one 30 in there.
+
+And we know that there is no way to split an e=2 double-node into two nodes where one has e=3.
+
+
+What about inserts?
+
+      3    6/7  10/11  14/15
+     /      /      \     \
+[xxx]   [12N3]   [yyyy]   [zzzz]          A first insertion that does NOT split the tree.
+
+
+     3   7           1    5     9
+    /     \         /     |      \
+[xxx]   [12NN]    [3]   [yyyy]   [zzzz]  A second insertion that DOES split the tree.
+
+
+So what we have now is a left node with e=0, and a right node with e=0, and a left parent with e=0 (7 slots in two nodes) and a right parent with e=0 (9 slots in two nodes)
+which will usually take an extra search step. And the new root has a "slot table" of [2;3], which is still e=0 (5 slots in two nodes).
+
+
+But what if we already had e=2 down there? I'll use M=8 for this illustration, as it might not be easy to picture it with M=4.
+
+To have e=2, we need Topt = T - 2. To split the tree, we need T=8 at the leaf level. So Topt = 6, and that means the minimum number
+of slots is (5*8)+1 = 41. So we have 41 slots across 8 nodes. To maximally pessimize the post-split rebalancing, let's put 7 slots
+into all the leftmost nodes we can, and we must have a node with 8 slots to be the one that's getting split. That's:
+
+7,7,7,7,7,8 = 43, no.
+
+7,7,7,7,8,3,1,1 = 41 slots across 8 nodes, pessimally. Then we insert into the 8 and get 7,7,7,7,5,4,3,1,1 = 42 slots across 9 nodes, e=3.
+Now that requires a rebalancing, but we can do it locally and not split the parent. The rebalancing becomes:
+
+7,7,7,7,8,4,1,1
+
+and we might as well have saved ourselves some effort by a special-case "slide half/a quarter/an eighth of your slots left or right" check.
+
+And the maximum number of slots for e=2 (Topt is still 6)
+
+
+Okay, what about the case where the SPLIT tree, with 9 nodes, has e=2 and MIGHT not be rebalanceable? Well, first
+let's build a case where the split tree is ACTUALLY not rebalanceable:
+
+7,7,7,7,7,7,7,7,7 (we'll end up skipping all the nodes). That's 7*9 = 63 slots across 9 nodes, when we really could fit into 8, so e=1.
+But to have e=2 with 9 nodes, Topt must be 7. So the number of slots for Topt=7 must be between (6*8)+1 and (7*8) = between 49 and 56.
+49 slots across 9 nodes, pessimally, could be 7,7,7,7,7,7,3,2,2. 56 slots across 9 nodes, pessimally, could be 7,7,7,7,7,7,7,6,1.
+BUT if we were skipping nodes of 6, then we could have 6,6,6,6,6,6,6,6,6 = 6*9 = 54, and not be able to rebalance on the formula. So
+when you're rebalancing against e=2 (because you, presumably, want to bring e back DOWN to 1), you can skip 7's but not 6's. If you're
+rebalancing against e=3 in 17 nodes (Topt=14), you have between (13*8)+1 and (14*8) slots = between 105 and 112. If we fill up as many
+nodes as possible with 6's, we could have 17 nodes of 6 slots = 102 slots, and a few higher, and so it's not safe to skip 6's when you're
+rebalancing a *double* node. When rebalancing a *single* node, though, we could have skipped those 6's. But to be on the safe side, we'll
+just skip 7's (or 31's in the M=32 case) and consider e=2 to be an acceptable error in double-node cases.
+
+BUT when splitting a SINGLE node, and deciding whether to rebalance after the split... then we should consider that e=2 means we can
+safely rebalance down into a single node again, whereas e=1 means we HAVE to split because we might not be able to rebalance. But wait,
+do we even WANT to rebalance in those cases? Inserts are likely to be followed by other inserts in the same place, right? Which would
+mean another split-and-rebalance, potentially, and that's what we want to avoid. So how about this:
+
+If inserting into a node with less than M slots, just do it. DONE.
+Now we know that our node has M slots.
+Does our right neighbor have less than M slots? (Check right first, as it makes for SLIGHTLY less work than left.)
+If so, let N = our neighbor's slot count. Ours is M. Let S=(M-N), divided by 2 and rounded UP so that it's at least 1.
+Slide S slots from us to our neighbor.
+Since S >= 1, we now have room for the insertion. Do it. DONE.
+Now we know our right neighbor has M slots. Check the left neighbor and do the same thing, and maybe we get DONE.
+But if we get to this point, we have M slots and so do our right and left neighbors.
+NOW we can go ahead and split our own node (at the insertion point).
+There's room for the insertion now, but we're not done. Check if the total number of nodes here is > M. If so, our parent won't be happy.
+... And here's the point where we might want to do a rebalance check. Reasoning down below says "ignore e=2, rebalance if e=3".
+So if e=3 or more, rebalance our node group and skip 7's, and we're guaranteed to get down to e=2 or less. DONE.
+But if e was 2 or less, then we're going to split this node group in half at the insertion point.
+The LEFT half of the split group will replace the current node in the parent (an update), and the RIGHT half will become an insertion.
+
+TODO: Work out the implementation details of that update-plus-insertion routine. It should be something like the direct-append algorithm...
+
+If we reach that point, we have an 8,5,4,8 sequence in the middle of a set of 9 nodes. What's the SMALLEST or LARGEST number of slots for
+which e=1, 2, or 3, matching that 8,5,4,8 pattern? Well, if e=1 for 9 nodes, Topt=8, so we have 57-64 slots. If e=2, 49-56 slots. If e=3, 41-48 slots.
+The 8,5,4,8 in the middle carves out 25 slots, so we have 1:(32-39) / 2:(24-31) / 3:(16-23) slots left for 5 nodes. In the case of e=1,
+that could be 8,8,8,8,7. So our pattern could, worst-case, be 8,8,8,8,7,8,5,4,8, which can't be rebalanced if we skip 7's. Therefore we
+have to NOT rebalance on e=1, and end up effectively doing an insert in the parent (that 9-slot node becomes 8+1), because there's a chance
+of the rebalance failing. But in the case of e=2, there are 24-31 slots in 5 nodes. That could be 7,7,7,7,3 in the densest case, giving us a
+possible pattern of 7,7,7,7,3,8,5,4,8 after the split. That one would grab the 3 and the 5 and merge them, to get 7,7,7,7,8,8,4,8, but there's
+going to be a real split-the-node after the next four inserts so we didn't really save much time there. And the LEAST dense case where e=2 would
+have 24 slots left across 5 nodes, which could be 5,5,5,5,4,8,5,4,8 if spread out, or 7,7,7,2,1,8,5,4,8 if together. Or to be the MOST pessimal,
+that could be 1,2,7,7,7,8,5,4,8. Splitting that at the insertion point gives us [1,2,7,7,7,8,5] and [4,8] as two new node groupings in the parent.
+The [1,2,7,7,7,8,5] one has 37 slots across 7 nodes, so its e=2 because 37 slots takes at least 5 nodes. So it's all right until we do a join at
+some point -- a split-the-tree could actually *improve* it, since [1,2] and [7,7,7,8,5] would have e=1 and e=0 respectively, and would not likely
+make it worse. And the search step error of that one would be 2 across most indices, which is still reasonable. Now let's look at e=3 in the
+densest case, where we're most likely to do extra work soon if we rebalance. The densest e=3 is 23 slots across 5 nodes besides the 8,5,4,8 pattern,
+so we get 7,7,7,1,1,8,5,4,8 in the densest case. The rebalancing of that would either become 7,7,7,2,8,5,4,8 with minimal rebalancing, or else
+7,7,7,8,8,3,8 with "optimal" rebalancing. (Or maybe even 7,7,7,8,8,8,3...) Since I've chosen to go with the minimal rebalancing in my approach,
+we end up with 7,7,7,2,8,5,4,8 and the insertion point is at the 5, meaning we have seven more possible inserts before we end up having to do another
+split. At that point, we're 7,7,7,2,8,8,8,8 before the split (55 across 8 nodes, e=1) and we go to 7,7,7,2,8,8,5,4,8 after the split (which is
+56 across 9 nodes, e=2). And since e=2, we won't rebalance, and we'll split into [7,7,7,2,8,8,5] and [4,8]. Both are reasonable, with the left
+having e=2 but not too much search step error. So even in the densest case, rebalancing at e=3 didn't end up costing us TOO much, and allowed us
+seven more relatively-simple inserts before we had to split the node and mess up the tree a little.
+
+THEREFORE, we should only rebalance if e=3 or worse after the split-the-node step, and ignore it the rest of the time.
+
+
+Idea for generating vectors to test with
+========================================
+
+Phil Bagwell generated vectors to test with by repeated splitting & joining. This would work, but until I write the join (concat)
+functions, I need to generate them another way. Here's how.
+
+We have already chosen the invariant e=2, so the number of nodes may be at most Nopt + 2. The idea is that we generate
+a node at a time. That means picking a size for the node (but actually, the size will be assigned for all but the root
+node) and then picking the number of descendants it can have. Since the size is assigned, we know the minimum and maximum
+number of children it can have and still satisfy the invariant. E.g., with M=8, a node of 1-3 children will satisfy the
+invariant no matter what (because N=3 must have at least three children with one slot each, so N(opt) is at least 1, so N=3
+must always satisfy the invariant). With 4 children, 8 slots would NOT satisfy, but 9 slots WOULD satisfy.
+
+So: min-slots = (N-3) * M + 1. And max-slots = N * M.
+
+So to generate a node, we are assigned a number for how many children it has. Then we calculate min-slots and max-slots,
+and we use Gen.choose(min-slots, max-slots) to pick total slots. Then we randomly distribute those total slots among
+all the children. (Be creative here: bucket-filling algorithm with a max size of M on each bucket, and once it hits M
+it is removed from consideration for other buckets.) Then once we've distributed the slots, we can redo the node-generating
+process for each child (and the number of slots it was assigned is the number of its children). We're also measuring a max
+number of levels, and once we hit the max number of levels (usually 1, 2, 3 or 4, no more than 4), we STOP generating new
+nodes and start generating leaves instead at that level. (So a child assigned 5 slots becomes a leaf with 5 items in it).
+Once we've generated ALL the leaves, we then start filling them up with random numbers.
+
+Or, if we're ESPECIALLY clever, we've been generating "fake" leaves, which we then replace with "real" leaves that have
+a sequential number of elements in them (i.e., the leftmost leaf gets 0..6, then 7..13 go in the next one, and so on).
+
+TODO: Expose a manual entry point in the vector generation code so we can construct specifically-shaped vectors. That
+way when the FsCheck tests expose a specific bug that's likely to crop up again as a regression, such as the scenario
+where the vector "[1 2 8] T1" was split at index 4, we should be able to pass the list [1;2;8] to our generation code
+and have it built that vector again. Or pass a string in the format of the tree viewer, so we can leverage the work we
+did there. That way we can construct more complicated vectors.
+
+NOTE: We'll have to expand the tree-viewer format to allow M to represent the branching factor (so that the test case
+we just discovered can be written as "[1 2 M] T1" and still work once M=32). In which case we'll also want to allow
+some node sizes to be written as "M-1", "M-2", etc. Basically, "M-k" where k is an integer literal.
+
+TODO: If we leverage the tree viewer work, then we should also have a function that goes the other way: take a vector
+and print its structure out in tree-viewer string format. Because while I could read the "[1 2 8] T1" vector pretty
+easily, I would have had a hard time reading a really complex one.
+
+
+Algorithm for inserts
+=====================
+
+I'm at level L. I figure out the correct index at my level, and call myself at level L-S. What is returned
+from level L-S is a (Node, Node option) tuple. The first part of the tuple is the replacement node for my
+level, and the second part is:
+  - None, if the lower level was able to fit the insertion in without growing.
+  - Some node, if the lower level could NOT fit the insertion.
+If the lower level could fit the insertion, then we replace it at the right index in our level,
+using mkTree because our size table *might* have been modified (see NOTE 1). Then we return a
+tuple (modified self, None) -- second part is None because we didn't need to add anything else.
+Now, if the second half of the tuple from our lower level was Some n, then that means we need to
+do a "real insert" at this level, immediately after the calculated index. So we'll replace the
+lower node as we would have anyway, then do the "real insert" at the next index on this level.
+And if we can fit that insert in, then we return (modified self, None) as before. If we can't
+fit it in, we split the node (as in the "real insert" method below) and then return the tuple
+(left half of split, Some right half of split).
+
+"REAL INSERT" method:
+
+We've talked about this above, so here's a pseudo-code algorithm copied from earlier.
+
+If inserting into a node with less than M slots, just do it. DONE.
+Now we know that our node has M slots.
+Does our right neighbor have less than M slots? (Check right first, as it makes for SLIGHTLY less work than left.)
+If so, let N = our neighbor's slot count. Ours is M. Let S=(M-N), divided by 2 and rounded UP so that it's at least 1.
+Slide S slots from us to our neighbor.
+Since S >= 1, we now have room for the insertion. Do it. DONE.
+Now we know our right neighbor has M slots. Check the left neighbor and do the same thing, and maybe we get DONE.
+But if we get to this point, we have M slots and so do our right and left neighbors.
+NOW we can go ahead and split our own node (at the insertion point).
+There's room for the insertion now, but we're not done. Check if the total number of nodes here is > M. If so, our parent won't be happy.
+... And here's the point where we might want to do a rebalance check. Reasoning down below says "ignore e=2, rebalance if e=3".
+So if e=3 or more, rebalance our node group and skip 7's, and we're guaranteed to get down to e=2 or less. DONE.
+But if e was 2 or less, then we're going to split this node group in half at the insertion point.
+The LEFT half of the split group will replace the current node in the parent (an update), and the RIGHT half will become an insertion.
+
+The rebalancing check is "ignore e=2, rebalance if e=3". That is, look at the current node and all its siblings, and the
+total number of slots (direct children) spread across all the siblings of the current node. Then calculate the difference
+between the number of children our parent has (i.e., if we're node D of ABCDEFG, our parent has 7 children) and the number
+of children this many slots *could* have fit into. (If there are 40 or fewer slots, it could have fit into 5 children if M=8).
+This calculation has already been coded in the doWeNeedToRebalance function: you look at your current N (here, 7). Then
+you subtract (e+1) from that: if e=2, then the result is 4. Multiply that by M (8 for these tests, 32 for real) and you get
+a target number of slots. If your current number of slots is <= that number, then you have at least (e+1) slots than is
+optimal, and you need to rebalance.
+
+Now, here's the thing. That rebalancing calculation just takes two numbers: a slot count and a node count. So before you
+split your node in two, you can do the math to see if you actually *need* to split it. Say M=8, and you're about to do
+an insert that requires an extra node. So your N is about to become 9. Subtract (e+1) and you get 6, so 6*8 = 48 slots
+is your magic number. If you have *strictly more* than 48 slots, then there's no rebalancing needed and you can proceed
+directly to doing the split. If you have *fewer* than 48 slots, then you just create a temporary array of length M+1 (9)
+by inserting the value into the correct index, and pass that temporary length-9 array to the rebalance function. The
+rebalance function is guaranteed to give you back an array of length 8 or less, and then you can return (x,None) to the
+level above in the recursive call.
+
+That means that insertions can take the following amount of time:
+
+* If it's an insert into a non-full leaf node, rewrite an array of length M at each level, just like an update. O(logM N), effectively O(1) when M=32.
+* If it's an insert into a full leaf node with a non-full parent, then you write two length-M leaf nodes, and the rest are updates. O(logM N), effectively O(1) when M=32.
+* If it's an insert into a full leaf with a full parent, but the parent could rebalance, effectively same as an update still.
+* If it's an insert that splits the tree all the way up, you never have to do a rebalance. You'll then rewrite 2 arrays (of combined length M+1) per level, still O(logM N).
+
+NOTE 1: There's possible opportunity for optimization here, with some "add 1 to size table from index i" function.
+But the initial implementation should be simple and unoptimized.
+
+
+Deletion
+========
+
+Deleting an item from the vector is a bit simpler than insertion. Three possible results:
+
+- The child node was rewritten but did not shrink (the simple case) - we rewrite ourselves and return a Rewritten result
+- The child node shrank but is still there: check if rebalance needed.
+    - If rebalance NOT needed, we become a Rewritten case.
+    - If rebalance needed, after rebalancing we become a Shrank case, so our parent will also check for rebalancing.
+- The child node vanished entirely, so we will become a Shrank or Vanished case. We don't need to check for rebalancing.
+
+At each level: params = thisLvlIdx thisNode
+    let chIdx, childNode, nextLvlIdx = appropriateIndexSearch shift thisNode thisLvlIdx
+    let result = recurse nextLvlIdx childNode
+    let resultLen = Array.length result
+    if resultLen <= 0 then
+        // Child vanished
+        Array.removeAt chIdx (nodeEntries thisNode)
+    elif resultLen < Array.length childNode then
+        // Child shrank: check if rebalance needed
+        let slotCount' = slotCount thisNode - 1
+        if doWeNeedToRebalance slotCount' (nodeSize thisNode / 1<nodeIdx>) then
+            Array.copyAndSet childIdx result (nodeEntries thisNode) |> rebalance
+        else
+            Array.copyAndSet childIdx result (nodeEntries thisNode)
+    else
+        // Child did not shrink
+        Array.copyAndSet childIdx result (nodeEntries thisNode)
+
+At top level: check if we're deleting in the tail. If we are and we just deleted the last tail item,
+promote tail (as in pop) and check new last leaf for any shifting needed (should this be part of the
+promote tail algorithm?). Otherwise call the recursive helper and make a new root from the array it returns.
+
+
+Notes on the List API
+=====================
+
+Items from the [List API](https://github.com/fsharp/fslang-design/blob/master/FSharp-4.0/ListSeqArrayAdditions.md),
+and how I plan to implement them. NOTE: In many places, I reference ofSeq with
+two different notations: "by pushes" or "known size". The former means I build
+a transient vector with repeated "push" operations, then make it persistent and
+return it. The latter means I build a set of size-32 arrays (usually by calling
+Seq.chunkBySize, or Array.chunkBySize, on the input, depending on what kind it
+was) containing the data, then feed them to a special "build from leaves"
+algorithm. Note: the tail is pulled off right before feeding them to that
+algorithm, and the algorithm knows how many items to expect.
+
+Note that a few functions are out of alphabetical order, because later functions
+depend on them.
+
+append - done
+sum - iterArrays |> Seq.sumBy Array.sum
+sumBy - iterArrays |> Seq.sumBy Array.sumBy
+average - sum / count (or just Seq.average)
+averageBy - sumBy / count
+contains - iterLeafArrays |> Seq.map Array.contains
+choose - iterItems |> Seq.choose f |> ofSeq (by pushes)
+chunkBySize - repeated split operations. TODO: See if there's a more efficient way.
+concat - Seq.fold append (details TBD)
+collect - iter items |> Seq.map f |> concat
+compareWith - iter items of A, iter items of B ||> Seq.compareWith
+countBy - iter items |> Seq.countBy |> ofSeq (or ofArray?? since Seq.countBy makes an array?) (by pushes, or known size if it's ofArray)
+distinct - iter items |> Seq.distinct |> ofSeq (by pushes)
+distinctBy - iter items |> Seq.distinctBy |> ofSeq (by pushes)
+splitInto - calculate split indices, use split algorithm as in chunkBySize
+empty - done
+exactlyOne - easy
+filter - items |> Seq.filter |> ofSeq (by pushes)
+except - use filter and a hash map (see Array implementation)
+exists - items |> Seq.exists
+exists2 - items A, items B ||> Seq.exists2
+find - items |> Seq.find
+findBack - items |> Seq.findBack
+findIndex - items |> Seq.findIndex
+findIndexBack - items |> Seq.findIndexBack
+fold - items |> Seq.fold (see if we can be more performant)
+fold2 - items A, items B ||> Seq.fold2 (see if we can be more performant)
+foldBack - revItems |> Seq.fold
+foldBack2 - revItems A, revItems B ||> Seq.fold2
+forall - iterArrays |> Seq.forall Array.forall
+forall2 - iterArrays A, iterArrays B ||> Seq.forall2 Array.forall2 (or Seq.forall2 for that latter one??)
+groupBy - items |> Seq.groupBy |> ofSeq (by pushes)
+head - easy
+indexed - items |> Seq.indexed |> ofSeq (known size)
+init - create a bunch of arrays and use the "known size" approach to make them a tree (after stripping off the tail)
+isEmpty - count = 0
+item - done
+iter - items |> Seq.iter
+iter2 - items |> Seq.iter2
+iteri - items |> Seq.iteri
+iteri2 - items |> Seq.iteri2
+last - easy
+length - count
+map - items |> Seq.map |> ofSeq (known size) (or build result arrays first, then put into tree)
+map2 - items A, items B ||> Seq.map2 |> ofSeq (known size) (or build result arrays first, then put into tree)
+map3 - items A, items B, items C |||> Seq.map3 |> ofSeq (known size) (or build result arrays first, then put into tree)
+mapi - items |> Seq.mapi |> ofSeq (known size) (or build result arrays first, then put into tree)
+mapi2 - items A, items B ||> Seq.mapi2 |> ofSeq (known size) (or build result arrays first, then put into tree)
+mapFold - look at Array implementation and copy it
+mapFoldBack - look at Array implementation and copy it
+max - items |> Seq.max
+maxBy - items |> Seq.maxBy
+min - items |> Seq.min
+minBy - items |> Seq.minBy
+nth - DO NOT implement; it's a compiler error if they try to use it.
+pairwise - iterItems, keep mutable "prevItem", build tuples into arrays, "known size" algorithm to make tree
+permute - build empty target array, populate with index function, ofArray (via known-size algorithm) (OR: build empty transient (known size), populate indices, make persistent)
+pick - items |> Seq.pick
+reduce - items |> Seq.reduce
+reduceBack - revItems |> Seq.reduce
+replicate - build target arrays, put into tree with known-size algorithm
+rev - revItems |> ofSeq (known size)
+scan - items |> Seq.scan |> ofSeq (known size)
+scanBack - revItems |> Seq.scan |> ofSeq (known size)
+singleton - easy
+skip - slice right (meaning left goes away), or split |> snd
+skipWhile - calculate index via iterArrays, then skip N (TODO: maybe there's a performance improvement possible at that point?)
+sort - tricky. TODO: Figure it out. Mergesort (and k-way merging via min heap) might help.
+sortBy - tricky. TODO: Figure it out. Ditto mergesort comment.
+sortWith - tricky. TODO: Figure it out. Ditto mergesort comment.
+sortDescending - tricky. TODO: Figure it out. Ditto mergesort comment.
+sortByDescending - tricky. TODO: Figure it out. Ditto mergesort comment.
+tail - removeAt 0 (and DO check for rebalancing)
+tailWithoutRebalance - removeAt 0 (and do NOT check for rebalancing) (special helper used in windowed, do not expose in API)
+take - slice left (meaning right goes away), or split |> fst
+takeWhile - calculate index via iterArrays, then take N (TODO: maybe there's a performance improvement possible at that point?)
+truncate - if N > count then (this vector) else take N
+tryFind - items |> Seq.tryFind
+tryFindBack - items |> Seq.tryFindBack
+tryFindIndex - items |> Seq.tryFindIndex
+tryFindIndexBack - items |> Seq.tryFindIndexBack
+tryHead - easy
+tryItem - easy
+tryLast - easy
+tryPick - items |> Seq.tryPick
+unfold - Seq.unfold |> ofSeq (by pushes)
+where - filter
+windowed - three cases:
+  1. windowSize <= blockSize   -> items |> Seq.windowed |> Seq.map (mkVecFromTailArray)
+  2. windowSize <= blockSize*2 -> items |> Seq.windowed |> Seq.map (splitAt blockSize >> mkVecFromRootAndTail)
+  3. windowSize >  blockSize*2 ->
+     let result = items |> Seq.truncate windowSize |> ofSeq (known size)
+     // TODO: Actually, get an Enumerator from items and use Next() a lot until we get that
+     yield result
+     let mutable i = windowSize
+     while i < count do
+        let result = result |> tailWithoutRebalance |> push nextItem
+        // Since the window size is at least 2M+1, there will always be a nearly-full leaf layer,
+        // with the left leaf constantly shrinking and the tail constantly growing until it gets
+        // big enough to become a new rightmost leaf. The rightmost leaf will always be full, and
+        // there will be no need to ever rebalance, shift items into tail, or change tree height.
+        yield result
+        i <- i + 1  // and continue while loop
+zip - items A, items B ||> Seq.zip |> ofSeq (known size)
+zip3 - items A, items B, items C |||> Seq.zip3 |> ofSeq (known size)
+
+Also, the new API functions added in F# 4:
+
+partition - build two transients at once (by pushes)
+splitAt - split function already written
+unzip - two arrays to populate, then each one turns into a tree (known size)
+unzip3 - three arrays to populate, then each one turns into a tree (known size)
+
+toArray - alloc entire result array; iterArrays and blit each into result
+toList - revItems |> Seq.map (::)   // :: is not a function, but we'll write one
+toSeq - iterItems
+
+To turn a single array of results into a tree, chunkBySize blockSize |> Array.map mkNode
+Then repeatedly:
+  let nextLevel = lowerLevel |> Array.chunkBySize blockSize |> Array.map mkNode
+  if nextLevel.Length > 1 then recurse
+Eventually we return the level where chunkBySize put them all into a single array (which was made into a node)
+
+I think the API for that buildTree algorithm will take an array of nodes.
+
+THOUGHT: Perhaps I should reconsider the decision that an empty vector will have
+a height of 1 (i.e., a shift of blockSizeShift). I'll try writing the code such
+that a vector of size up to blockSize*2 can have a height of 0: the tail, plus
+a single leaf as a root. This will require rewriting the algorithms that look
+for the leftmost or rightmost twig, and having them check the vector's shift
+before doing so, but I think it might produce simpler code. If I do this, I'll
+also need to look at the ofVector function, because PersistentVector uses a
+shift of blockSizeShift for empty vectors. So in ofVector, I'll have to check
+whether the length of the argument is blockSize*2, and if so, do a leaf+tail
+special case. There are going to be some other special cases too, which I'll
+discover as I write the code. But once it's written, I should have a good handle
+on whether it's an improvement or not; I think it will be.
+
+MERGE ALGORITHM with shift=0 small vectors:
+
+Possible scenarios:
+
+A empty, B empty. Result empty.
+A empty, B not. Result = B.
+A non-empty, B empty. Result = A.
+--- Below this line, A and B both contain at least ONE item. ---
+A has empty root, B has empty root. Result: A's tail becomes root, B's tail is tail.  <-- Special case
+A has empty root, B is 0-shift root+tail. Three sub-possibilities:
+  A tail + B root <= M. Combine A tail and B root into one, keep B tail, shift is still 0.
+  A tail + B root > M (by elimination since we got here), *BUT* A tail + B root + B tail all combined <= 2M. Append-and-split all three arrays into a single root+tail where root is size M, shift=0.
+  A tail + B root + B tail > 2M, so can't fit it into a shift=0 result. New root node is [|A tail; B root|] at shift BSS, and B tail is new vec's tail.
+A is 0-shift root+tail, B has empty root. Three sub-possibilities:
+  A tail + B tail <= M. Combine A and B tails into one, keep A root, shift is still 0.
+  A tail + B tail > M (by elimination since we got here), *BUT* A root + A tail + B tail all combined <= 2M. Append-and-split all three arrays into a single root+tail where root is size M, shift=0.
+  A root + A tail + B root > 2M, so can't fit it into a shift=0 result. New root node is [|A root; A tail|] at shift BSS, and B tail is new vec's tail.
+--- Below this line, A has a non-empty root AND B has a non-empty root. ---
+If A's shift is 0, pull it up into a shift-3 sapling.
+If B's shift is 0, pull it up into a shift-3 sapling.
+Do the previous algorithm.
+
+
+
+Thoughts about regression testing
+=================================
+
+There are a number of commented-out ftestProp values all over the place. I should use "git blame"
+to go back and look up when they were commented out, and check out the code at that time and run
+the test again to see what the failing scenario was. Then write a *specific* unit test that tests
+that particular scenario, and pull that specific regression test into the current state of the
+code -- where it should *hopefully* pass. Then I can start getting rid of the commented-out seed
+numbers for all the old ftestProps from the past. Once I have gotten rid of all of them, I'll be
+very confident in my set of regression tests, since I'll have a specific test case (just one) that
+reproduces a failure from the past.
+
+
+URL for F# 4.0 API additions: https://github.com/Microsoft/visualfsharpdocs/blob/f982ee948548ccf2c542b88e3da311067fed32fa/docs/conceptual/whats-new-in-visual-fsharp.md
